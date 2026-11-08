@@ -7,7 +7,13 @@ async def extract_elements(pages):
     # maybe work with Javascript okay firstly write a javascript 
     script = '''
 () => {
-let selectors = 'button, textarea, radio, a, input, select, [role="button"]';
+let selectors = 'button, textarea, radio, a, input, select, [role="button"],
+        [role="link"],
+        [role="checkbox"],
+        [role="radio"],
+        [role="switch"],
+        [role="tab"],
+        [role="menuitem"]';
 let elements = document.querySelectorAll(selectors)
 
 const allElements = document.querySelectorAll('*');
