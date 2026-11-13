@@ -1,3 +1,5 @@
+# to start chrome : 
+# Start-Process chrome -ArgumentList "--remote-debugging-port=9222", "--user-data-dir=C:\selenium\chrome-debug-profile"
 from __future__ import annotations
 from playwright.sync_api import sync_playwright, Error as PlaywrightError
 import ollama
@@ -13,7 +15,7 @@ current_page_url = ''
 curr_state = []
 next_task = ''
 query = "Change my Leetcode profile picture to the one you might find from google."
-MODEL = 'deepseek-r1:14b'
+MODEL = 'nemotron-3-nano:4b'
 f_name = f"debug_{datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")}.txt"
 file = open(f_name, "w+")
 def extract_elements(pages):
@@ -117,7 +119,7 @@ class next_action(BaseModel):
     task_state: Annotated[
         Literal["error_occured", "completed", "running"],
         Field(description=(
-            "Keep track of the currently executed task. Used for debugging. Keep the default to running."
+            "Keep track of the currently executed task. Used for debugging. Keep the default to running. Don't mark it by urself , python will handle this automatically, set this always to running."
         ))
     ]
     
@@ -182,20 +184,16 @@ system_prompt_3 = '''Based on the given query Your task is to generate the initi
 e.g. Query : Change my instagram profile. Output : https://www.instagram.com
 e.g.2 Query : move my youtube playlist to spotify. Output : https://www.youtube.com/
 Make sure the output format is as follows : 
->>>Output Start
 https://www.example.com
-<<<OUTPUT END
 Be sure to just return the link which suits best as the initial link according to the given query and thus going to be first website to go on to.
 '''
 
 ERROR_VALIDATION_PROMPT = '''You are given an error that occured while trying to decide the next immediate action in the current script and you are also provided with a list of already occured states in the current execution with curr_state and a Task List which consists of list of items in plain words. Based on the given curr_state and the error, your task is to generate a new_task list based on the given error in order to fix the given error. 
 You need to keep the format of task list as it was and generate your output in the same structure as the task list. 
 Expected output format:
->>>output start 
 1. step_1
 2. step_2
 3. step_3
-<<<output_end
 
 It Might be worthy to rethink your own reponse before providing the final output to the user. Generate three different answers and then select one based on your own thinking. try to reason them. Also make sure the final output strictly follows the mentioned structure.
 To provide the given output follow the given steps: 
@@ -228,7 +226,7 @@ def navigate_url(url):
     while True: 
         try:
             page.goto(url,wait_until="load", timeout=10000)
-            print("Sucessfully Loaded the page")
+            print(f"Sucessfully Loaded the page {url}")
             break
         except PlaywrightError as e:
             curr_state.append(f"Error during navigating to {url}")
@@ -257,6 +255,7 @@ with sync_playwright() as p:
                 ],
             format=next_action.model_json_schema())
         raw_response = output['message']['content']
+        print(raw_response)
 
         #Pydantic validation
         try:
@@ -276,6 +275,7 @@ with sync_playwright() as p:
             curr_state.append(next_action_data)
             task_list = response['message']['content']
             curr_state.append(f"Encountered and addressed error: {next_action_data.error}")
+            print("Encountered and addressed error: {next_action_data.error}")
             file.write(f"{curr_state}\n")
             continue
 
