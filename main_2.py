@@ -10,37 +10,35 @@ from ollama import Client
 import os
 
 # query = "Search on gemini about Change my leetcode profile by image from google."
-query = "Search on youtube how to beat someone on leetcode"
-def debug_message(message):
-    print("\n========== MESSAGE BREAKDOWN ==========")
-    print("Type:", type(message).__name__)
+# query = "Search on youtube how to beat someone on leetcode"
+query = input("What should i do ! ")
 
-    if isinstance(message, dict):
-        for key, value in message.items():
-            serialized = json.dumps(value, ensure_ascii=False)
-            print(
-                f"{key}: {len(serialized)} chars "
-                f"({len(serialized) // 4} approx tokens)"
-            )
 
-    elif isinstance(message, str):
-        print("Message is a string.")
-        print("Total characters:", len(message))
+# BROWSER TABS MANAGEMENT
+# relatively easy 
+# if no dependent tabs create a new tab 
+class BrowserWindow:
+    def __init__(self, context) -> None:
+         self._tab_id = 1
+         self.context = context
+         self.opened_tabs = []
+         self.tab_id_page = {}
+         self.current_visible_tab_id = None
 
-        # Inspect the largest sections if your message
-        # contains serialized JSON.
-        try:
-            parsed = json.loads(message)
-            debug_message(parsed)
-        except (ValueError, TypeError):
-            print(message[:500])
+    def create_new_tab(self):
+        self.opened_tabs.append(self._tab_id)
+        page = self.context.new_page()
+        self.tab_id_page[self._tab_id] = page
+        self.current_visible_tab_id = self._tab_id
+        self._tab_id += 1
+        page.bring_to_front()
+        return page
 
-    elif isinstance(message, list):
-        print("Items:", len(message))
-        for i, item in enumerate(message):
-            print(f"Item {i}: {len(str(item))} chars")
-
-    print("======================================")
+    def switch_tab(self, tab_id):
+        temp_page = self.tab_id_page[tab_id]
+        temp_page.bring_to_front()
+        self.current_visible_tab_id = tab_id
+        return temp_page
 
 def ask_chatgpt(message):
    # chatgpt_page = next(
@@ -78,12 +76,6 @@ def ask_chatgpt(message):
       # paste the query and messages okay
       locator_elem = chatgpt_page.get_by_placeholder("Ask ChatGPT")
       locator_elem.wait_for(state="visible",timeout=30000)
-      payload = json.dumps(message, ensure_ascii=False)
-
-      print("\n========== PROMPT DEBUG ==========")
-      print("Characters:", len(payload))
-      print("Approx tokens:", len(payload) // 4)
-      print("Size in KB:", round(len(payload.encode("utf-8")) / 1024, 2))
 
       if isinstance(message, dict):
          for key, value in message.items():
@@ -143,14 +135,36 @@ main_task = Task(query)
 
 class Subtask:
     _counter = 1
-    def __init__(self, description, prev_exec_task = None, output = None, completed= False,) -> None:
+    def __init__(self, endgoal, description, prev_exec_task = None, output = None, completed= False,) -> None:
         self.subtask_id = Subtask._counter
         Subtask._counter += 1
         self.description = description
+        self.dependent_tab = None # if no dependent tab implies tab is itself a greater tab
+        self.tab_id = []
+        self.endgoal = endgoal
         self.previously_executed_task = prev_exec_task
         self.executed_tasks = []
         self.sub_task_execution_output = output
         self.completed = completed
+
+class Subtask_think(BaseModel):
+    description : Annotated[str, Field(
+        description=("Description of the new subtask, along with considering the previous subtask's outputs ( and including them if required) in consideration. If no previous subtask is there implies this is the first subtask.")
+    )]
+    dependent_tab : Annotated[list, Field(
+        description=("Exact id of the tab the current task is dependent on, If the current subtask is dependent on one of the previous subtask's output i.e. previous tab, it must must that tab_id. Leave it empty if the current subtask is independent.")
+    )]
+    endgoal : Annotated[str, Field(
+        description=("The expected output of the current subtask.")
+    )]
+
+    @model_validator(mode="after")
+    def validate_dependent_tabs_field(self):
+            if self.dependent_tab not in browser_window.opened_tabs:
+                raise ValueError("The Given Tab is not currently opened implied you pointed to a invalid tab.")
+            
+                
+        
 
 class NextAction(BaseModel):
         selected_element_id: Annotated[
@@ -165,7 +179,7 @@ class NextAction(BaseModel):
             ))
         ] 
         action : Annotated[
-         Literal['click', 'fill', 'locate'], 
+         Literal['click', 'fill', 'locate', 'switch'], 
          Field(
             description=(
                 "The browser operation to perform. Use 'click' to activate "
@@ -180,9 +194,10 @@ class NextAction(BaseModel):
                 default= '',
             description=(
                 "Never use 'none' or 'null' as text. Use an empty string."
-                "The exact text to enter when action is 'fill'. or url when action is 'locate'"
+                "The exact text to enter when action is 'fill'. or url when action is 'locate' or tab_id which to switch on when action is switch"
                 "Preserve the intended spelling, capitalization, and content. "
                 "if action is 'locate' provide the exact url browser should redirect to for further execution of script"
+                "If action is switch provide the exact tab_id which the task should switch to from opened tabs based on subtask."
                 "Must be emptry string for 'click'."
                 "IT MUST PROVIDE NOTHING ELSE AND JUST EITHER URL OR THE EXACT TEXT TO FILL IN"
             )
@@ -193,9 +208,16 @@ class NextAction(BaseModel):
         def validate_action_fields(self):
             if self.text.strip().lower() in ["none", "null"]:
                   raise ValueError("Never use 'none' or 'null' as text. Use an empty string.")
-            if self.action == "fill" or self.action == "locate":
+            if self.action == "fill" or self.action == "locate" or self.action == "switch":
                   if not self.text:
-                           raise ValueError("Text is not provided when action is fill.")
+                           raise ValueError("Text is not provided when action is fill/locate/switch.")
+            if self.action == "switch":
+                if self.text not in browser_window.opened_tabs:
+                    raise ValueError("Target tab is not available in the list of currently opened tabs.")
+            if self.action == "locate":
+               if self.text.rstrip("/") == page.url.rstrip("/"):
+                  raise ValueError("Already on this URL. Choose an action on the current page.")
+
             if self.action == "locate":
                try:
                   HttpUrl(self.text)
@@ -231,6 +253,7 @@ def extract_visible_text(page):
 def validate_action_compatibility(action, page_content):
    if action.action == "locate":
         return
+   
 
    element = next( (
             e for e in page_content
@@ -623,6 +646,8 @@ def extract_elements(page):
     return page.evaluate(script)
 
 
+
+
 SUBTASK_COMPLETION_DECIDER = '''
 You are state decider component of a browser automation agent.
 You will recieve:
@@ -644,27 +669,39 @@ You are the planning component of a browser automation agent.
 You will receive:
 - The original user query.
 - previously generated subtasks in "tasks" where each subtask provides information about their current status and execution outputs.
+- in each subtask there will be an associated tab_id with it which will represent the tab which was linked with this task.
 - The current webpage URL.
+- list of currently opened tabs
+- current_tab_id which represents the tab_id assigned to the current subtask.
+- each subtask has a description, an endgoal which decides when the task is considered complete and the output value which is the result of the subtask, it might be some text it copied or just a website itself.
 
+A subtask is either depedent on the result of the previous subtask or use the result of previous task to peform a new task OR it is an independent subtask. 
+A subtask's endgoal might be fetching of any data say an OTP from a website and in the output it must output that otp or it might generate a website where OTP is needed to be entered. It might be just doing some work on the website and generating the website itself might be the endgoal of that subtask so that other subsequent subtask can refer to it to keep the automation workflow manageable.
+If a subtask do some work on a website like filling up a form the end goal should be to make the form website ready to be used for another subtask which might need some other data from some other website.
 Your responsibility is to determine the NEXT logical subtask required to complete the user's original query. and only return the output in plain english and nothing else.
 
-Rules: 
-- Generate exactly ONE next subtask.
-- consider the execution history and the query before deciding what to do next.
+YOUR RESPONSIBILITY :
+- Generate TWO THINGS : DESCRIPTION OF THE NEW SUBTASK, ENDGOAL OF THIS NEW SUBTASK
+- Firstly decide whether the subtask needs to do some work on the website which are outputs of the previous subtasks and is already opened or whether it requires opening of a new tab. THIS STEP IS CRUCIAL SINCE IT WILL DECIDE THE OVERALL STRUCTURE OF THE TASK. Please determine if this task requires work on the already opened tab or is it independent task by putting the value of relevant tab id in the dependent_tab.
+- consider the execution history and the query, the currently opened tabs and previous subtask's metadata before deciding what to do next.
+- Please output the description and endgoal based on the relationship with the currently opened tabs or whether it has no dependency. Describe what the task is needing to do and what is the endgoal which will decide what it servers really Describe what the task is needing to do and what is the endgoal which will decide what it servers really.
 - The subtask must contribute directly towards completing the original user query.
 - Do not assume that an action succeeded merely because it was previously requested. Use its execution output.
-
-THINKING PROCESS:
-- based on page_content, decide what is the page about and whether everything is alright, it might be invalid page or you might not be logged in, you might be stuck in a loop,
-try to think what next action should take you more toward the subtask !
-- you might just be at a wrong url as well !
+- based on page_content and the currently opened tabs, decide what is the page about and whether everything is alright, it might be invalid page or you might not be logged in, you might be stuck in a loop,
+  try to think what next action should take you more toward the subtask !
 - you might be doing something completely irrelavant, make sure you think about ur execution history and make a better subtask which contribute to the automation.
 
+Rules: 
+- it a task is dependent on the already opened tab, please provide the id of the already opened in dependent_tab.
+- if a task is dependent on outputs of the previous subtasks make sure to produce the description considering that.
+- if a task is completely independent, your job is to leave dependent_tabs empty, otherwise populate the tab_ids of the related tabs in dependent tabs.
 
 examples of subtasks:
-- Opening instagram.com
+- paste the copied otp from the subtask 2's output into subtask 1's tab id 
+- Opening instagram.com and enter the given address in the login email.
 - Searching for xyz product on amazon.
 - navigating to facebook.com.
+
 Return only the next subtask description in plain English.
 '''
 
@@ -674,35 +711,35 @@ You are the planning component of a browser automation agent.
 You will receive:
 - The original user query.
 - The current webpage URL.
+- currently page is not pointing to any particular website since its the start of the script.
+- each subtask has a description, an endgoal which decides when the task is considered complete and the output value which is the result of the subtask, it might be some text it copied or just a website itself.
 
-Your responsibility is to determine the FIRST logical subtask required to complete the user's original query. and only return the output in plain english and nothing else.
+A subtask is either depedent on the result of the previous subtask or use the result of previous task to peform a new task OR it is an independent subtask. 
+A subtask's endgoal might be fetching of any data say an OTP from a website and in the output it must output that otp or it might generate a website where OTP is needed to be entered. It might be just doing some work on the website and generating the website itself might be the endgoal of that subtask so that other subsequent subtask can refer to it to keep the automation workflow manageable.
+If a subtask do some work on a website like filling up a form the end goal should be to make the form website ready to be used for another subtask which might need some other data from some other website.
+Your responsibility is to determine the NEXT logical subtask required to complete the user's original query. and only return the output in plain english and nothing else.
 
-Rules:
-- generate only the initial subtask required and the subtask must contribute directly towards completing the original user query.
-STRICT OUTPUT RULES:
-1. If action is "locate":
-   - text MUST contain the destination URL.
-   - selected_element_id MUST be -1.
-2. If action is "click":
-   - text MUST be an empty string "".
-   - selected_element_id MUST contain the exact element ID.
-3. If action is "fill":
-   - text MUST contain the value to enter.
-   - selected_element_id MUST contain the exact element ID.
-
-
-IMPORTANT:
-- Never output "none", "null", "None", or "N/A" as text.
-- Empty string "" is the ONLY valid representation of no text.
-- These are strict requirements, not suggestions.
+YOUR RESPONSIBILITY :
+- YOU NEED TO DECIDE FOR THE FIRST INITIAL SUBTASK WHICH WILL BE FURTHER USED FOR OTHER SUBTASKS IF REQUIRED
+- Generate TWO THINGS : DESCRIPTION OF THE NEW SUBTASK, ENDGOAL OF THIS NEW SUBTASK
+- Firstly decide whether the subtask needs to do some work on the websites which are outputs of the previous subtasks and are already opened or whether it requires opening of a new tab. THIS STEP IS CRUCIAL SINCE IT WILL DECIDE THE OVERALL STRUCTURE OF THE TASK. Please determine if this task requires work on the already opened tabs or is it independent task by putting the values of relevant tab ids in the dependent_tabs.
+- consider the execution history and the query, the currently opened tabs and previous subtask's metadata before deciding what to do next.
+- Please output the description and endgoal based on the relationship with the currently opened tabs or whether it has no dependency. Describe what the task is needing to do and what is the endgoal which will decide what it servers really Describe what the task is needing to do and what is the endgoal which will decide what it servers really.
+- The subtask must contribute directly towards completing the original user query.
+- Do not assume that an action succeeded merely because it was previously requested. Use its execution output.
+- based on page_content and the currently opened tabs, decide what is the page about and whether everything is alright, it might be invalid page or you might not be logged in, you might be stuck in a loop,
+  try to think what next action should take you more toward the subtask !
+- you might be doing something completely irrelavant, make sure you think about ur execution history and make a better subtask which contribute to the automation.
 
 
 examples of subtasks:
-- Opening instagram.com
+- Opening instagram.com and enter the given address in the login email.
 - Searching for xyz product on amazon.
 - navigating to facebook.com.
+
 Return only the next subtask description in plain English.
 '''
+
 
 CREATE_NEXT_ACTION = '''
 You are next action deciding Component of a browser.
@@ -722,6 +759,9 @@ You are provided with the following:
    to complete the current subtask, including
    their execution results. this maybe empty
 
+5. currently opened tabs 
+
+
 YOUR RESPONSIBILITY:
 Determine the NEXT SINGLE browser action required
 to make progress towards completing the given subtask.
@@ -739,14 +779,17 @@ AVAILABLE ACTIONS:
    Fill a text input, textarea or contenteditable
    element with the required text.
 
+4. switch:
+    Switch to an already Opened tab instead.
+
 THINKING PROCESS:
-- based on page_content, decide what is the page about and whether everything is alright, it might be invalid page or you might not be logged in, you might be stuck in a loop,
+- based on page_content, subtask description, endgoal and currently opened tabs, decide what is the page about and whether everything is alright, it might be invalid page or you might not be logged in, you might be stuck in a loop,
 try to think what next action should take you more toward the subtask !
 
 DECISION RULES:
 1. Carefully examine the subtask, current URL,
    page contents and execution history before
-   selecting an action.
+   selecting an action. If subtask requires you to switch to a tab, provide its tab_id in the text field along with making action as switch.
 
 2. If the current webpage is irrelevant to the
    subtask, navigate to the appropriate webpage.
@@ -917,33 +960,26 @@ execution_subtask_cnt = 0
 with sync_playwright() as p:
     browser = p.chromium.connect_over_cdp("http://localhost:9222")
     default_context = browser.contexts[0]
-    pages = default_context.pages
-    page = default_context.pages[0] if default_context.pages else default_context.new_page()
-
-    while True: # main error execution loop
+    browser_window = BrowserWindow(default_context)
+    
+    while True: # main execution loop
         if execution_subtask_cnt == 0:
-                #output = client.chat(model=MODEL, messages=[
-                #        {'role':'system', 'content': CREATE_INITIAL_SUBTASK},
-               #       {'role':'user', 'content': f"curr_url : {curr_page_url}, query : {query}"}
-                #])
-
                 messages=[
                         {'role':'system', 'content': CREATE_INITIAL_SUBTASK},
                         {'role':'user', 'content': f"curr_url : {curr_page_url}, query : {query}"}
-    
                 ]
-                debug_message(messages)
-                subt = ask_chatgpt(messages)
-
-                subtask = Subtask(subt)
+                subt = dict(ask_chatgpt(messages))
+                description = subt['description']
+                endgoal = subt['endgoal'] 
+                subtask = Subtask(endgoal, description)
                 execution_subtask_cnt += 1
 
         elif execution_subtask_cnt > 0:
+                task_history = [vars(task) for task in main_task.tasks]
                 messages = [{'role':'system', 'content': TASK_COMPLETEION_DECIDER},
-                           {'role': 'user', 'content': f"user_query : {main_task.query}\n ALL SUBTASKS LIST : {main_task.tasks} \n Current_page_url : {curr_page_url} \n current_page_visual_context : {extract_visible_text(page)} "}
+                           {'role': 'user', 'content': f"user_query : {main_task.query}\n ALL SUBTASKS LIST : {task_history} \n Current_page_url : {curr_page_url} \n current_page_visual_context : {extract_visible_text(page)} "}
                            ]
                 
-                debug_message(messages)
                 res = ask_chatgpt(messages).strip().lower()
                 if res not in ['true', 'false']:
                   raise ValueError("Invalid completion response")
@@ -964,23 +1000,26 @@ with sync_playwright() as p:
                #  ])
                 messages=[
                         {'role':'system', 'content': CREATE_SUBTASK_PROMPT},
-                        {'role':'user', 'content': f"curr_url : {curr_page_url}, query : {query}"},
+                        {'role':'user', 'content': f"curr_url : {curr_page_url}, query : {main_task.query}"},
                         {'role':'user', 'content': f"subtask_history : {task_history}, current_page_contents : {page_content} "},
                         {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(page)}"}
                 ]
-                debug_message(messages)
                 subt = ask_chatgpt(messages)
-                subtask = Subtask(subt)
+                description = subt['description']
+                endgoal = subt['endgoal'] 
+                subtask = Subtask(endgoal, description)
+                subtask.dependent_tab = subt['dependent_tab']
                 execution_subtask_cnt += 1
 
         print(vars(subtask))
         # execution of subtask phase 
         # So like right now. What I have is basically. I have a sub task. And and. I want to give the model my so task. Along with page contents. Along with. Current web page URL. And all the previously occurred tasks. And model's job is to just. Provide that next action. Is not it too easy? But wait, even here. Think more. So like you will provide. Model a certain action. There can be errors in the action. Like I mean to say that you have an action. You need to handle the errors..ro But first. It is for true that. Yeah, I will decide what to do next. From that natural language. Don't think the next action. Based on the current page content. Is it clear? Yes, it is. So just provide. Yeah, these things and make sure that the action it give is more reliable. It doesn't address any error No it does not. Or it does it. It's a bit complex thing. Because what it needs to tell is. Like if you have this particular seat. Then you need to either locate. Or slept or whatever stuff
-
+        
+        curr_subtask_page = browser_window.create_new_tab()
         error = ""
         while not subtask.completed:
-                curr_page_url = page.url
-                page_content = extract_elements(page)
+                curr_page_url = curr_subtask_page.url
+                page_content = extract_elements(curr_subtask_page)
 
                 if error:
                         # output = client.chat(model=MODEL, messages=[
@@ -994,11 +1033,9 @@ with sync_playwright() as p:
                                 {'role': 'user', 'content': f"current_web_page_url : {curr_page_url}, \n page_content : {page_content} \n sub_task :{subtask.description} \n  previously_execute_subtask : {subtask.previously_executed_task} \n {vars(subtask)} \n executed_actions : {subtask.executed_tasks}"},
                                 {'role': "user", 'content': f"error encountered while trying to generate output last time : {error}\n your previous response full of error : {subtask.previously_executed_task}"},
                                 {'role': 'user', 'content': f"OUTPUT FORMAT : {NextAction.model_json_schema()}"},
-                                {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(page)}"}
+                                {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(page)}, users_original_query : {main_task.query}"}
                         ]
 
-
-                        debug_message(messages)
                         output = ask_chatgpt(messages)
                         error = ''
                 else:
@@ -1012,11 +1049,9 @@ with sync_playwright() as p:
                                 {'role': 'system', 'content' : CREATE_NEXT_ACTION},
                                 {'role': 'user', 'content': f"current_web_page_url : {curr_page_url}, \n page_content : {page_content} \n sub_task :{subtask.description} \n  previously_execute_subtask : {subtask.previously_executed_task} \n {vars(subtask)} \n executed_actions : {subtask.executed_tasks} "},
                                 {'role': 'user', 'content': f"OUTPUT FORMAT : {NextAction.model_json_schema()}"},
-                                {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(page)}"}
+                                {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(page)}, main_user query : {main_task.query}"}
                         ]
 
-
-                        debug_message(messages)
                         output = ask_chatgpt(messages)
 
 
@@ -1048,6 +1083,13 @@ with sync_playwright() as p:
                         locator_elem = page.locator(
                                 f'[data_agent_id="{next_action.selected_element_id}"]'
                         )
+                        if locator_elem.count() < 1:
+                           error = "Page rerendered and thus selected element is not found on the page."
+                           print(error)
+                           error = "Page rerendered and thus selected element is not found on the page."
+                           continue
+                        
+
                         if next_action.action == "click":
                                 locator_elem.click()
                                 subtask.previously_executed_task = f"Sucessfully click on the element {target_elem} the page {curr_page_url}"
@@ -1065,10 +1107,9 @@ with sync_playwright() as p:
                 messages=[
                     {'role':'system', 'content':SUBTASK_COMPLETION_DECIDER},
                     {'role': 'user', 'content': f"subtask Description : {subtask.description} \n executed tasks list : {subtask.executed_tasks}, previously_executed task taken towards subtask : {subtask.previously_executed_task}"},
-                    {'role':'user', 'content': f"curr_url : {curr_page_url} curr_page visual text content : {extract_visible_text(page)}"}
+                    {'role':'user', 'content': f"curr_url : {curr_page_url} curr_page visual text content : {extract_visible_text(page)}, original query : {main_task.query}"}
                  ]
 
-                debug_message(messages)
                 result = ask_chatgpt(messages).strip().lower()
 
                 if result not in ("true", "false"): 
