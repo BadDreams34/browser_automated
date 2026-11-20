@@ -8,49 +8,71 @@ from typing import Literal, Optional, Annotated
 import ollama
 from ollama import Client
 import os
+import sys
 
 # query = "Search on gemini about Change my leetcode profile by image from google."
 # query = "Search on youtube how to beat someone on leetcode"
-query = input("What should i do !")
-
+query = input("What should i do > ")
 
 # BROWSER TABS MANAGEMENT
 # relatively easy 
 # if no dependent tabs create a new tab 
+class Tab:
+    def __init__(self, id,page):
+        self.tab_id = id
+        self.page = page
 
 class BrowserWindow:
     def __init__(self, context) -> None:
-         self._tab_id = 1
-         self.context = context
-         self.opened_tabs = {}
-         self.tab_id_page = {}
-         self.page_tab_id = {}
-         self.current_visible_tab_id = None
-
-    def update_url(self, page):
-        tab_id = self.page_tab_id[page]
-        self.tab_id_page[tab_id] = page
-        self.opened_tabs[tab_id] = page.url()
+        self._tab_id = 1
+        self.context = context
+        self.opened_tabs = []
+        self.current_visible_tab_id = None
 
     def create_new_tab(self):
         page = self.context.new_page()
-        self.opened_tabs[self._tab_id] = page.url
-        self.tab_id_page[self._tab_id] = page
-        self.page_tab_id[page] = self._tab_id
+        tab = Tab(self._tab_id, page)
         self.current_visible_tab_id = self._tab_id
         self._tab_id += 1
+        self.opened_tabs.append(tab)
         page.bring_to_front()
         return page
 
     def switch_tab(self, tab_id):
-        temp_page = self.tab_id_page[tab_id]
-        temp_page.bring_to_front()
+        found = False
+        for tab in self.opened_tabs:
+            if tab.tab_id == tab_id:
+                found = True
+                page = tab.page
+        if not found:
+            raise ValueError("Given Tab_id is not valid")
+        page.bring_to_front()
         self.current_visible_tab_id = tab_id
-        self.page_tab_id[temp_page] = tab_id
-        return temp_page
+        return page
 
-        
+def current_browser_state(browser_window):
+    tabs = []
+    for tab in browser_window.opened_tabs:
+        tabs.append({
+                "tab_id": tab.tab_id,
+                "url": tab.page.url,
+                "title": tab.page.title(),
+                "is_current": (
+                    tab.tab_id ==
+                    browser_window.current_visible_tab_id
+                )
+            })
+    return tabs
+
+def corrected_tab(tab_id, browser_window):
+    for tab in browser_window.opened_tabs:
+        if tab.tab_id == tab_id:
+            return tab.page
+    raise ValueError("Given Tab is not found in the list of currently opened tabs")
+            
     
+
+
 def ask_chatgpt(message):
    # chatgpt_page = next(
    #  (p for p in pages if "chatgpt.com" in p.url),
@@ -102,13 +124,11 @@ def ask_chatgpt(message):
          timeout=120000
       )
 
-
       # Copy response
       copy_button = chatgpt_page.get_by_label("Copy response").last
       copy_button.wait_for(state="visible", timeout=30000)
       pyperclip.copy("")
       copy_button.click()
-
 
       time.sleep(1)
 
@@ -128,6 +148,7 @@ def ask_chatgpt(message):
          chatgpt_page.close()
 
 
+
 client = Client(
     host='http://localhost:11434',
 )
@@ -136,6 +157,7 @@ MODEL = 'qwen3.5:4b'
 
 curr_page_url = ''
 
+    
 
 class Task:
    def __init__(self, query, iscompleted=False) -> None:
@@ -146,11 +168,11 @@ main_task = Task(query)
 
 class Subtask:
     _counter = 1
-    def __init__(self, endgoal, description, prev_exec_task = None, output = None, completed= False,) -> None:
+    def __init__(self, endgoal, description, dependent_tab = -1, prev_exec_task = None, output = None, completed= False,) -> None:
         self.subtask_id = Subtask._counter
         Subtask._counter += 1
         self.description = description
-        self.dependent_tab = None # if no dependent tab implies tab is itself a greater tab
+        self.dependent_tab = dependent_tab # if no dependent tab implies tab is itself a greater tab
         self.tab_id = []
         self.endgoal = endgoal
         self.previously_executed_task = prev_exec_task
@@ -169,16 +191,8 @@ class Subtask_think(BaseModel):
         description=("The expected output of the current subtask.")
     )
 ]
-
-    @model_validator(mode="after")
-    def validate_dependent_tabs_field(self):
-        if self.dependent_tab != -1 and self.dependent_tab not in browser_window.opened_tabs.keys():
-            raise ValueError("The Given Tab is not currently opened implied you pointed to a invalid tab.")
-        return self
             
                 
-        
-
 class NextAction(BaseModel):
         selected_element_id: Annotated[
         int,
@@ -225,7 +239,12 @@ class NextAction(BaseModel):
                   if not self.text:
                            raise ValueError("Text is not provided when action is fill/locate/switch.")
             if self.action == "switch":
-                if self.text not in browser_window.opened_tabs:
+                found = False
+                for tab in browser_window.opened_tabs:
+                    if int(self.text) == tab.tab_id:
+                        found = True
+                if not found:    
+                    print(current_browser_state(browser_window))
                     raise ValueError("Target tab is not available in the list of currently opened tabs.")
             if self.action == "locate":
                if self.text.rstrip("/") == curr_subtask_page.url.rstrip("/"):
@@ -264,10 +283,10 @@ def extract_visible_text(page):
    
 
 def validate_action_compatibility(action, page_content):
-   if action.action == "locate":
+   if action.action == "locate" or action.action == "switch":
         return
 
-   element = next( (
+   element = next((
             e for e in page_content
             if e["id"] == action.selected_element_id
         ),
@@ -1004,79 +1023,160 @@ ELEMENT COMPATIBILITY RULES:
 '''
 execution_subtask_cnt = 0
 
+error = ''
 with sync_playwright() as p:
     browser = p.chromium.connect_over_cdp("http://localhost:9222")
     default_context = browser.contexts[0]
     browser_window = BrowserWindow(default_context)
     
     while True: # main execution loop
-        if execution_subtask_cnt == 0:
+        if len(error) != 0:
+                task_history = [vars(task) for task in main_task.tasks]
+                messages = [{'role':'system', 'content': TASK_COMPLETEION_DECIDER},
+                            {'role': 'user', 'content': f"user_query : {main_task.query}\n ALL SUBTASKS LIST : {task_history} \n Current_page_url : {curr_page_url} \n current_page_visual_context : {extract_visible_text(curr_subtask_page)}  currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"},
+                                {'role': 'user', 'content': f"OUTPUT FORMAT : {Subtask_think.model_json_schema()}"}
+                            ]
+                
+                i = 0
+                completion_error = ''
+                while i == 0 or len(completion_error) != 0:
+                    if completion_error:
+                        messages.append({'role':'user', 'content': f"{completion_error}"})
+                    res = ask_chatgpt(messages).strip().lower()
+                    i += 1
+                    if res not in ['true', 'false']:
+                        completion_error = "INVALID COMPLETION RESPONSE IN THE COMPLETION RESPONSE YOU RETURN SOMETHING ELSE THAN TRUE OR FALSE"
+                        print("INVALID COMPLETION RESPONSE IN THE COMPLETION RESPONSE YOU RETURN SOMETHING ELSE THAN TRUE OR FALSE")
+                        continue
+                    completion_error = ''
+                    main_task.completed = res == 'true'
+                    if main_task.completed:
+                        print("AUTOMATION SUCESSFULLY COMPLETED")
+                        sys.exit() 
 
-            messages=[
-                    {'role':'system', 'content': CREATE_INITIAL_SUBTASK},
-                    {'role':'user', 'content': f"curr_url : {curr_page_url}, query : {query}currently_opened_tab_ids with urls currently opeend : {browser_window.opened_tabs}"},
-                    {'role': 'user', 'content': f"OUTPUT FORMAT : {Subtask_think.model_json_schema()}"}
-            ]
+                page_content = extract_elements(curr_subtask_page)
+                task_history = [vars(task) for task in main_task.tasks]
+                print(task_history)
+                #  output = client.chat(model=MODEL, messages=[
+                #          {'role':'system', 'content': CREATE_SUBTASK_PROMPT},
+                #          {'role':'user', 'content': f"curr_url : {curr_page_url}, query : {query}"},
+                #          {'role':'user', 'content': f"subtask_history : {task_history}, current_page_contents : {page_content} "}
+                #  ])
+                messages=[
+                        {'role':'system', 'content': CREATE_SUBTASK_PROMPT},
+                        {'role':'user', 'content': f"curr_url : {curr_page_url}, query : {main_task.query}"},
+                        {'role':'user', 'content': f"subtask_history : {task_history}, current_page_contents : {page_content} "},
+                        {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(curr_subtask_page)} \n currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"}
+                ]
+                raw_response = ask_chatgpt(messages)
+                raw_response = raw_response.replace(r'\_', '_')
+                raw_response = raw_response.replace(r'\[', '[')
+                raw_response = raw_response.replace(r'\]', ']')
+                subt = Subtask_think.model_validate_json(raw_response)
+                description = subt.description
+                endgoal = subt.endgoal 
+                subtask = Subtask(endgoal, description)
+                subtask.dependent_tab = subt.dependent_tab
+                execution_subtask_cnt += 1
 
-            raw_response = ask_chatgpt(messages)
-            raw_response = raw_response.replace(r'\_', '_')
-            raw_response = raw_response.replace(r'\[', '[')
-            raw_response = raw_response.replace(r'\]', ']')
-            subt = Subtask_think.model_validate_json(raw_response)
-            description = subt.description
-            endgoal = subt.endgoal 
-            subtask = Subtask(endgoal, description)
-            subtask.dependent_tab = subt.dependent_tab
-            execution_subtask_cnt += 1
+                print(vars(subtask))
+                # execution of subtask phase 
+                # So like right now. What I have is basically. I have a sub task. And and. I want to give the model my so task. Along with page contents. Along with. Current web page URL. And all the previously occurred tasks. And model's job is to just. Provide that next action. Is not it too easy? But wait, even here. Think more. So like you will provide. Model a certain action. There can be errors in the action. Like I mean to say that you have an action. You need to handle the errors..ro But first. It is for true that. Yeah, I will decide what to do next. From that natural language. Don't think the next action. Based on the current page content. Is it clear? Yes, it is. So just provide. Yeah, these things and make sure that the action it give is more reliable. It doesn't address any error No it does not. Or it does it. It's a bit complex thing. Because what it needs to tell is. Like if you have this particular seat. Then you need to either locate. Or slept or whatever stuff
+                
+                if subtask.dependent_tab != -1:
+                    try:
+                        curr_subtask_page = corrected_tab(subtask.dependent_tab, browser_window)
+                        error = ''
+                    except ValueError as e:
+                        print(e)
+                        error = e
+                        continue
+                else:
+                    curr_subtask_page = browser_window.create_new_tab()
+        else:
+            if execution_subtask_cnt == 0:
+                messages=[
+                        {'role':'system', 'content': CREATE_INITIAL_SUBTASK},
+                        {'role':'user', 'content': f"curr_url : {curr_page_url}, query : {query}currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"},
+                        {'role': 'user', 'content': f"OUTPUT FORMAT : {Subtask_think.model_json_schema()}"}
+                ]
 
-        elif execution_subtask_cnt > 0:
+                raw_response = ask_chatgpt(messages)
+                raw_response = raw_response.replace(r'\_', '_')
+                raw_response = raw_response.replace(r'\[', '[')
+                raw_response = raw_response.replace(r'\]', ']')
+                subt = Subtask_think.model_validate_json(raw_response)
+                description = subt.description
+                endgoal = subt.endgoal 
+                subtask = Subtask(endgoal, description)
+                subtask.dependent_tab = subt.dependent_tab
+                execution_subtask_cnt += 1
+                curr_subtask_page = browser_window.create_new_tab()
 
-            task_history = [vars(task) for task in main_task.tasks]
-            messages = [{'role':'system', 'content': TASK_COMPLETEION_DECIDER},
-                        {'role': 'user', 'content': f"user_query : {main_task.query}\n ALL SUBTASKS LIST : {task_history} \n Current_page_url : {curr_page_url} \n current_page_visual_context : {extract_visible_text(curr_subtask_page)} currently_opened_tab_ids with urls currently opeend : {browser_window.opened_tabs}"},
-                            {'role': 'user', 'content': f"OUTPUT FORMAT : {Subtask_think.model_json_schema()}"}
-                        ]
+
+            elif execution_subtask_cnt > 0:
+                task_history = [vars(task) for task in main_task.tasks]
+                messages = [{'role':'system', 'content': TASK_COMPLETEION_DECIDER},
+                            {'role': 'user', 'content': f"user_query : {main_task.query}\n ALL SUBTASKS LIST : {task_history} \n Current_page_url : {curr_page_url} \n current_page_visual_context : {extract_visible_text(curr_subtask_page)}  currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"},
+                                {'role': 'user', 'content': f"OUTPUT FORMAT : {Subtask_think.model_json_schema()}"}
+                            ]
+                
+                i = 0
+                completion_error = ''
+                while i == 0 or len(completion_error) != 0:
+                    if completion_error:
+                        messages.append({'role':'user', 'content': f"{completion_error}"})
+                    res = ask_chatgpt(messages).strip().lower()
+                    i += 1
+                    if res not in ['true', 'false']:
+                        completion_error = "INVALID COMPLETION RESPONSE IN THE COMPLETION RESPONSE YOU RETURN SOMETHING ELSE THAN TRUE OR FALSE"
+                        print("INVALID COMPLETION RESPONSE IN THE COMPLETION RESPONSE YOU RETURN SOMETHING ELSE THAN TRUE OR FALSE")
+                        continue
+                    completion_error = ''
+                    main_task.completed = res == 'true'
+                    if main_task.completed:
+                        print("AUTOMATION SUCESSFULLY COMPLETED")
+                        sys.exit() 
+
+                page_content = extract_elements(curr_subtask_page)
+                task_history = [vars(task) for task in main_task.tasks]
+                print(task_history)
+                #  output = client.chat(model=MODEL, messages=[
+                #          {'role':'system', 'content': CREATE_SUBTASK_PROMPT},
+                #          {'role':'user', 'content': f"curr_url : {curr_page_url}, query : {query}"},
+                #          {'role':'user', 'content': f"subtask_history : {task_history}, current_page_contents : {page_content} "}
+                #  ])
+                messages=[
+                        {'role':'system', 'content': CREATE_SUBTASK_PROMPT},
+                        {'role':'user', 'content': f"curr_url : {curr_page_url}, query : {main_task.query}"},
+                        {'role':'user', 'content': f"subtask_history : {task_history}, current_page_contents : {page_content} "},
+                        {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(curr_subtask_page)} \n currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"}
+                ]
+                raw_response = ask_chatgpt(messages)
+                raw_response = raw_response.replace(r'\_', '_')
+                raw_response = raw_response.replace(r'\[', '[')
+                raw_response = raw_response.replace(r'\]', ']')
+                subt = Subtask_think.model_validate_json(raw_response)
+                description = subt.description
+                endgoal = subt.endgoal 
+                subtask = Subtask(endgoal, description)
+                subtask.dependent_tab = subt.dependent_tab
+                execution_subtask_cnt += 1
+
+                print(vars(subtask))
+                # execution of subtask phase 
+                # So like right now. What I have is basically. I have a sub task. And and. I want to give the model my so task. Along with page contents. Along with. Current web page URL. And all the previously occurred tasks. And model's job is to just. Provide that next action. Is not it too easy? But wait, even here. Think more. So like you will provide. Model a certain action. There can be errors in the action. Like I mean to say that you have an action. You need to handle the errors..ro But first. It is for true that. Yeah, I will decide what to do next. From that natural language. Don't think the next action. Based on the current page content. Is it clear? Yes, it is. So just provide. Yeah, these things and make sure that the action it give is more reliable. It doesn't address any error No it does not. Or it does it. It's a bit complex thing. Because what it needs to tell is. Like if you have this particular seat. Then you need to either locate. Or slept or whatever stuff
+                
+                if subtask.dependent_tab != -1:
+                    try:
+                        curr_subtask_page = corrected_tab(subtask.dependent_tab, browser_window)
+                    except ValueError as e:
+                        print(e)
+                        #LITERALLY FIX IT SO SEND IT TO THE AI AGAIN
+                        continue
+                else:
+                    curr_subtask_page = browser_window.create_new_tab()
             
-            res = ask_chatgpt(messages).strip().lower()
-            if res not in ['true', 'false']:
-                raise ValueError("Invalid completion response")
-            main_task.completed = res == 'true'
-            if main_task.completed:
-                print("AUTOMATION SUCESSFULLY COMPLETED")
-                break
-            
-            
-
-            page_content = extract_elements(curr_subtask_page)
-            task_history = [vars(task) for task in main_task.tasks]
-            print(task_history)
-            #  output = client.chat(model=MODEL, messages=[
-            #          {'role':'system', 'content': CREATE_SUBTASK_PROMPT},
-            #          {'role':'user', 'content': f"curr_url : {curr_page_url}, query : {query}"},
-            #          {'role':'user', 'content': f"subtask_history : {task_history}, current_page_contents : {page_content} "}
-            #  ])
-            messages=[
-                    {'role':'system', 'content': CREATE_SUBTASK_PROMPT},
-                    {'role':'user', 'content': f"curr_url : {curr_page_url}, query : {main_task.query}"},
-                    {'role':'user', 'content': f"subtask_history : {task_history}, current_page_contents : {page_content} "},
-                    {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(curr_subtask_page)} currently_opened_tab_ids with urls currently opeend : {browser_window.opened_tabs}"}
-            ]
-            raw_response = ask_chatgpt(messages)
-            raw_response = raw_response.replace(r'\_', '_')
-            raw_response = raw_response.replace(r'\[', '[')
-            raw_response = raw_response.replace(r'\]', ']')
-            subt = Subtask_think.model_validate_json(raw_response)
-            description = subt.description
-            endgoal = subt.endgoal 
-            subtask = Subtask(endgoal, description)
-            subtask.dependent_tab = subt.dependent_tab
-            execution_subtask_cnt += 1
-
-        print(vars(subtask))
-        # execution of subtask phase 
-        # So like right now. What I have is basically. I have a sub task. And and. I want to give the model my so task. Along with page contents. Along with. Current web page URL. And all the previously occurred tasks. And model's job is to just. Provide that next action. Is not it too easy? But wait, even here. Think more. So like you will provide. Model a certain action. There can be errors in the action. Like I mean to say that you have an action. You need to handle the errors..ro But first. It is for true that. Yeah, I will decide what to do next. From that natural language. Don't think the next action. Based on the current page content. Is it clear? Yes, it is. So just provide. Yeah, these things and make sure that the action it give is more reliable. It doesn't address any error No it does not. Or it does it. It's a bit complex thing. Because what it needs to tell is. Like if you have this particular seat. Then you need to either locate. Or slept or whatever stuff
-        
-        curr_subtask_page = browser_window.create_new_tab()
         error = ""
         while not subtask.completed:
                 curr_page_url = curr_subtask_page.url
@@ -1094,7 +1194,7 @@ with sync_playwright() as p:
                                 {'role': 'user', 'content': f"current_web_page_url : {curr_page_url}, \n page_content : {page_content} \n sub_task :{subtask.description} \n  previously_execute_subtask : {subtask.previously_executed_task} \n {vars(subtask)} \n executed_actions : {subtask.executed_tasks}"},
                                 {'role': "user", 'content': f"error encountered while trying to generate output last time : {error}\n your previous response full of error : {subtask.previously_executed_task}"},
                                 {'role': 'user', 'content': f"OUTPUT FORMAT : {NextAction.model_json_schema()}"},
-                                {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(curr_subtask_page)}, users_original_query : {main_task.query}currently_opened_tab_ids with urls currently opeend : {browser_window.opened_tabs}"}
+                                {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(curr_subtask_page)}, users_original_query : {main_task.query}currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"}
                         ]
 
                         output = ask_chatgpt(messages)
@@ -1108,35 +1208,34 @@ with sync_playwright() as p:
 
                         messages=[
                                 {'role': 'system', 'content' : CREATE_NEXT_ACTION},
-                                {'role': 'user', 'content': f"current_web_page_url : {curr_page_url}, \n page_content : {page_content} \n sub_task :{subtask.description} \n  previously_execute_subtask : {subtask.previously_executed_task} \n {vars(subtask)} \n executed_actions : {subtask.executed_tasks} currently_opened_tab_ids with urls currently opeend : {browser_window.opened_tabs}"},
+                                {'role': 'user', 'content': f"current_web_page_url : {curr_page_url}, \n page_content : {page_content} \n sub_task :{subtask.description} \n  previously_execute_subtask : {subtask.previously_executed_task} \n {vars(subtask)} \n executed_actions : {subtask.executed_tasks} currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"},
                                 {'role': 'user', 'content': f"OUTPUT FORMAT : {NextAction.model_json_schema()}"},
-                                {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(curr_subtask_page)}, main_user query : {main_task.query}"}
+                                {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(curr_subtask_page)}, main_user query : {main_task.query}\n currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"}
                         ]
 
                         output = ask_chatgpt(messages)
 
                # raw_response = output['message']['content']
                 raw_response = output.replace(r'\_', '_')
-                #pydantic validation 
                 try:
+                        #pydantic validation 
                         subtask.previously_executed_task = raw_response
                         next_action = NextAction.model_validate_json(raw_response)
-                except ValidationError as e:
+                        #semantic error validation 
+                        validate_action_compatibility(next_action, page_content)
+                except (ValidationError, ValueError) as e:
                         print(e)
-                        error = e
+                        error = str(e)
                         continue
                 print(next_action)
 
-                #semantic error validation 
-                validate_action_compatibility(next_action, page_content)
-
-                
                 # automation using playwright
                 if next_action.action == "switch":
-                    curr_subtask_page = curr_subtask_page.switch_tab(next_action.text)
+                    curr_subtask_page = browser_window.switch_tab(int(next_action.text))
                     subtask.previously_executed_task = f"Sucessfully switched to the tab with id {next_action.text}"
                     subtask.executed_tasks.append(subtask.previously_executed_task)
                 if next_action.action == "locate":
+                        curr_subtask_page = browser_window.create_new_tab()
                         navigate_url(next_action.text, curr_subtask_page)
                         subtask.previously_executed_task = f"Sucessfully located the page {next_action.text}"
                         subtask.executed_tasks.append(subtask.previously_executed_task)
@@ -1157,11 +1256,9 @@ with sync_playwright() as p:
                                 subtask.previously_executed_task = f"Sucessfully click on the element {target_elem} the page {curr_page_url}"
                                 subtask.executed_tasks.append(subtask.previously_executed_task)
                         else:
-
                                 locator_elem.fill(next_action.text)
                                 subtask.previously_executed_task = f"Sucessfully filled the text {next_action.text} on the element {target_elem}"
                                 subtask.executed_tasks.append(subtask.previously_executed_task)
-                
                 
                 
                 # decide whether the subtask is completed or whether there is still action remaining 
@@ -1169,7 +1266,7 @@ with sync_playwright() as p:
                 messages=[
                     {'role':'system', 'content':SUBTASK_COMPLETION_DECIDER},
                     {'role': 'user', 'content': f"subtask Description : {subtask.description} \n subtask expected endgoal : {subtask.endgoal} \n executed tasks list : {subtask.executed_tasks}, previously_executed task taken towards subtask : {subtask.previously_executed_task}"},
-                    {'role':'user', 'content': f"curr_url : {curr_page_url} curr_page visual text content : {extract_visible_text(curr_subtask_page)}, original query : {main_task.query}currently_opened_tab_ids with urls currently opeend : {browser_window.opened_tabs}"}
+                    {'role':'user', 'content': f"curr_url : {curr_page_url} curr_page visual text content : {extract_visible_text(curr_subtask_page)}, original query : {main_task.query} \n currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"}
                  ]
 
                 result = ask_chatgpt(messages).strip().lower()
@@ -1182,7 +1279,7 @@ with sync_playwright() as p:
                     messages=[
                         {'role':'system', 'content':SUBTASK_OUTPUT_FEEDER},
                         {'role': 'user', 'content': f"subtask Description : {subtask.description} \n subtask expected endgoal : {subtask.endgoal} \n executed tasks list : {subtask.executed_tasks}, previously_executed task taken towards subtask : {subtask.previously_executed_task}"},
-                        {'role':'user', 'content': f"curr_url : {curr_page_url} curr_page visual text content : {extract_visible_text(curr_subtask_page)}, original query : {main_task.query} currently_opened_tab_ids with urls currently opeend : {browser_window.opened_tabs}"}
+                        {'role':'user', 'content': f"curr_url : {curr_page_url} curr_page visual text content : {extract_visible_text(curr_subtask_page)}, original query : {main_task.query} currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"}
                     ]
                     subtask.sub_task_execution_output = ask_chatgpt(messages)
                     main_task.tasks.append(subtask)
