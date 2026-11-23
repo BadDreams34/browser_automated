@@ -129,7 +129,8 @@ def ask_chatgpt(message):
 client = Client(
     host='http://localhost:11434',
 )
-MODEL = 'qwen3.5:4b' # download a model in ollama and provide the name of the model here 
+#MODEL = 'qwen3.5:4b' # download a model in ollama and provide the name of the model here 
+MODEL = 'gemma4:e4b'
 
 curr_page_url = '' # variable holding the url of the current tab
 
@@ -169,6 +170,15 @@ class Subtask_think(BaseModel):
         description=("The expected output of the current subtask.")
     )
 ]
+class Decision_format(BaseModel):
+    """Output format specifier of the final decision made by the subtask completion decider"""
+    decision : Annotated[bool, Field(
+        description=(
+            "Your task is to decide whether the thing is completed or not "
+            "You need to return 'True' if it is completed and 'False' if it is not."
+        )
+    )]
+
                 
 class NextAction(BaseModel):
         '''Output Format of the next action decider llm query'''
@@ -562,27 +572,28 @@ with sync_playwright() as p:
     while True: # main execution loop
         if len(error) != 0:
                 task_history = [vars(task) for task in main_task.tasks]
-                messages = [{'role':'system', 'content': TASK_COMPLETEION_DECIDER},
-                            {'role': 'user', 'content': f"user_query : {main_task.query}\n ALL SUBTASKS LIST : {task_history} \n Current_page_url : {curr_page_url} \n current_page_visual_context : {extract_visible_text(curr_subtask_page)}  currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"},
-                                {'role': 'user', 'content': f"OUTPUT FORMAT : {Subtask_think.model_json_schema()}"}
-                            ]
                 i = 0
                 completion_error = ''
                 while i == 0 or len(completion_error) != 0:
+                    messages = [{'role':'system', 'content': TASK_COMPLETEION_DECIDER},
+                            {'role': 'user', 'content': f"user_query : {main_task.query}\n ALL SUBTASKS LIST : {task_history} \n Current_page_url : {curr_page_url} \n current_page_visual_context : {extract_visible_text(curr_subtask_page)}  currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"},
+                            ]
                     if completion_error:
                         messages.append({'role':'user', 'content': f"{completion_error}"})
                     if use_local_llm:
-                        response = client.chat(model=MODEL, messages=messages)
-                        res = response['message']['content'].strip().lower()
+                        response = client.chat(model=MODEL, messages=messages , format=Decision_format.model_json_schema())
+                        res = response['message']['content']
+                        print(res)
+                        res = Decision_format.model_validate_json(res).decision
+                        completion_error = ''
+                        main_task.completed = res == True
                     else:
                         res = ask_chatgpt(messages).strip().lower()
+                        if res not in ['true', 'false']:
+                            completion_error = "INVALID COMPLETION RESPONSE IN THE COMPLETION RESPONSE YOU RETURN SOMETHING ELSE THAN TRUE OR FALSE"
+                            print("INVALID COMPLETION RESPONSE IN THE COMPLETION RESPONSE YOU RETURN SOMETHING ELSE THAN TRUE OR FALSE")
+                            continue
                     i += 1
-                    if res not in ['true', 'false']:
-                        completion_error = "INVALID COMPLETION RESPONSE IN THE COMPLETION RESPONSE YOU RETURN SOMETHING ELSE THAN TRUE OR FALSE"
-                        print("INVALID COMPLETION RESPONSE IN THE COMPLETION RESPONSE YOU RETURN SOMETHING ELSE THAN TRUE OR FALSE")
-                        continue
-                    completion_error = ''
-                    main_task.completed = res == 'true'
                     if main_task.completed:
                         print("AUTOMATION SUCESSFULLY COMPLETED")
                         sys.exit() 
@@ -605,6 +616,7 @@ with sync_playwright() as p:
                 if use_local_llm:
                     res = client.chat(model=MODEL, messages=messages)
                     raw_response = res['message']['content']
+                    print(raw_response)
                 else:
                     raw_response = ask_chatgpt(messages)
                     raw_response = raw_response.replace(r'\_', '_')
@@ -637,6 +649,7 @@ with sync_playwright() as p:
                         ]
                     res = client.chat(model=MODEL, messages=messages, format=Subtask_think.model_json_schema() )
                     raw_response = res['message']['content']
+                    print(raw_response)
                 else:
                     messages=[
                             {'role':'system', 'content': CREATE_INITIAL_SUBTASK},
@@ -682,17 +695,20 @@ with sync_playwright() as p:
                             messages = [{'role':'system', 'content': TASK_COMPLETEION_DECIDER},
                                 {'role': 'user', 'content': f"user_query : {main_task.query}\n ALL SUBTASKS LIST : {task_history} \n Current_page_url : {curr_page_url} \n current_page_visual_context : {extract_visible_text(curr_subtask_page)}  currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"},
                                 ]
-                        response = client.chat(model=MODEL, messages=messages, format=Subtask_think.model_json_schema())
-                        res = response['message']['content']
+                        response = client.chat(model=MODEL, messages=messages, format=Decision_format.model_json_schema())
+                        reslt = response['message']['content']
+                        res = Decision_format.model_validate_json(reslt).decision
+                        main_task.completed = res == True
+                        print(res)
                     else:
                         res = ask_chatgpt(messages).strip().lower()
+                        if res not in ['true', 'false']:
+                            completion_error = "INVALID COMPLETION RESPONSE IN THE COMPLETION RESPONSE YOU RETURN SOMETHING ELSE THAN TRUE OR FALSE"
+                            print("INVALID COMPLETION RESPONSE IN THE COMPLETION RESPONSE YOU RETURN SOMETHING ELSE THAN TRUE OR FALSE")
+                            continue
+                            main_task.completed = res == 'true'
                     i += 1
-                    if res not in ['true', 'false']:
-                        completion_error = "INVALID COMPLETION RESPONSE IN THE COMPLETION RESPONSE YOU RETURN SOMETHING ELSE THAN TRUE OR FALSE"
-                        print("INVALID COMPLETION RESPONSE IN THE COMPLETION RESPONSE YOU RETURN SOMETHING ELSE THAN TRUE OR FALSE")
-                        continue
                     completion_error = ''
-                    main_task.completed = res == 'true'
                     if main_task.completed:
                         print("AUTOMATION SUCESSFULLY COMPLETED")
                         sys.exit() 
@@ -708,6 +724,7 @@ with sync_playwright() as p:
                             {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(curr_subtask_page)} \n currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"}
                     ])
                     raw_response = output['message']['content']
+                    print(raw_response)
                 else:
                     messages = [
                             {'role':'system', 'content': CREATE_SUBTASK_PROMPT},
@@ -743,15 +760,19 @@ with sync_playwright() as p:
                 page_content = extract_elements(curr_subtask_page)
 
                 if error:
+                        print(f"ERROR IN NEXT SUBTASK ACTION #DEBUG {error}")
                         if use_local_llm:
-                            output_res = client.chat(model=MODEL, messages=[
+                            message = [
                                     {'role': 'system', 'content' : CREATE_NEXT_ACTION_ERROR},
-                                    {'role': 'user', 'content': f"current_web_page_url : {curr_page_url}, \n page_content : {page_content} \n sub_task :{subtask.description} \n  previously_execute_subtask : {subtask.previously_executed_task} \n {vars(subtask)} \n executed_actions : {subtask.executed_tasks}, \n subtask_status : {subtask.sub_task_status}"},
-                                    {'role': "user", 'content': f"error encountered while trying to generate output last time : {error}\n your previous response full of error : {subtask.previously_executed_task}"}
+                                    {'role': 'user', 'content': f"current_web_page_url : {curr_page_url}, \n page_content : {page_content} \n sub_task :{subtask.description} \n  previously_execute_subtask : {subtask.previously_executed_task} \n {vars(subtask)} \n executed_actions : {subtask.executed_tasks}"},
+                                    {'role': "user", 'content': f"error encountered while trying to generate output last time : {error}\n your previous response full of error : {subtask.previously_executed_task}"},
                                     {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(curr_subtask_page)}, users_original_query : {main_task.query}currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"}
-                            ],
-                            format = NextAction.model_json_schema())
-                            output = output_res['message']['content']
+                            ]
+
+                            print(f"#DEBUG INPUT MESSAGE \n\n {message} \n\n\n")
+                            output_res = client.chat(model=MODEL, messages = message, format = NextAction.model_json_schema())
+                            raw_response = output_res['message']['content']
+                            print(raw_response)
                         else:
                             messages=[
                                     {'role': 'system', 'content' : CREATE_NEXT_ACTION_ERROR},
@@ -761,15 +782,18 @@ with sync_playwright() as p:
                                     {'role':'user', 'content': f"curr_page visual text content : {extract_visible_text(curr_subtask_page)}, users_original_query : {main_task.query}currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"}
                             ]
                             output = ask_chatgpt(messages)
+                            raw_response = output.replace(r'\_', '_')
                         error = ''
+                        print(f"ERROR IN NEXT SUBTASK ACTION #DEBUG {error}")
                 else:
                         if use_local_llm:
                             res = client.chat(model=MODEL, messages=[
                                     {'role': 'system', 'content' : CREATE_NEXT_ACTION},
-                                    {'role': 'user', 'content': f"current_web_page_url : {curr_page_url}, \n page_content : {page_content} \n sub_task :{subtask.description} \n  previously_execute_subtask : {subtask.previously_executed_task} \n {vars(subtask)} \n executed_actions : {subtask.executed_tasks}, \n subtask_status : {subtask.sub_task_status}"}
+                                    {'role': 'user', 'content': f"current_web_page_url : {curr_page_url}, \n page_content : {page_content} \n sub_task :{subtask.description} \n  previously_execute_subtask : {subtask.previously_executed_task} \n {vars(subtask)} \n executed_actions : {subtask.executed_tasks}"}
                             ],
                             format = NextAction.model_json_schema())
                             raw_response = res['message']['content']
+                            print(raw_response)
                             
                         else:
                             messages=[
@@ -780,7 +804,6 @@ with sync_playwright() as p:
                             ]
                             output = ask_chatgpt(messages)
                             raw_response = output.replace(r'\_', '_')
-
                 try:
                         #pydantic validation 
                         subtask.previously_executed_task = raw_response
@@ -832,20 +855,27 @@ with sync_playwright() as p:
                     {'role':'user', 'content': f"curr_url : {curr_page_url} curr_page visual text content : {extract_visible_text(curr_subtask_page)}, original query : {main_task.query} \n currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"}
                  ]
                 if use_local_llm:
-                    output = client.chat(model=MODEL, messages=messages)
-                    result = output.strip().lower()
+                    output = client.chat(model=MODEL, messages=messages, format= Decision_format.model_json_schema(),options={"temperature": 0})
+                    result = output['message']['content']
+                    print(result)
+                    result = Decision_format.model_validate_json(result).decision
+                    subtask.completed = result == True
                 else:
                     result = ask_chatgpt(messages).strip().lower()
-
-                if result not in ("true", "false"): 
-                  raise ValueError("Invalid completion response")
-
-                subtask.completed = result == "true"
+                    if result not in ("true", "false"): 
+                        raise ValueError("Invalid completion response")
+                    subtask.completed = result == "true"
                 if subtask.completed:
                     messages=[
                         {'role':'system', 'content':SUBTASK_OUTPUT_FEEDER},
                         {'role': 'user', 'content': f"subtask Description : {subtask.description} \n subtask expected endgoal : {subtask.endgoal} \n executed tasks list : {subtask.executed_tasks}, previously_executed task taken towards subtask : {subtask.previously_executed_task}"},
                         {'role':'user', 'content': f"curr_url : {curr_page_url} curr_page visual text content : {extract_visible_text(curr_subtask_page)}, original query : {main_task.query} currently_opened_tab_ids with urls currently opeend : {current_browser_state(browser_window)}"}
                     ]
-                    subtask.sub_task_execution_output = ask_chatgpt(messages)
+                    if use_local_llm:
+                        output = client.chat(model=MODEL, messages=messages,options={"temperature": 0})
+                        res = output['message']['content']
+                        print(res)
+                        subtask.sub_task_execution_output = res
+                    else:
+                        subtask.sub_task_execution_output = ask_chatgpt(messages)
                     main_task.tasks.append(subtask)

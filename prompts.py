@@ -248,7 +248,6 @@ If this task is completed, it marks the end of the original query automation and
 DO NOT RETURN ANYTHING ELSE THAN THE WORD True or False.
 expected output : 
 True/False
-
 '''
 
 CREATE_NEXT_ACTION_ERROR = '''
@@ -292,8 +291,8 @@ DECISION RULES:
 1. Carefully examine the subtask, current URL,
    page contents and execution history before
    selecting an action.
-
-2. If the current webpage is irrelevant to the
+2. Make sure to check the current_page_visual text to determine if you are on desired page, if not then try to locate to a correct url.
+If the current webpage is irrelevant to the
    subtask, navigate to the appropriate webpage.
 
 3. If the current webpage is relevant, examine the given page_content for the 
